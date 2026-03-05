@@ -239,3 +239,11 @@ For the full `text_generator_main` flag list, see the `ABSL_FLAG(...)` definitio
 
 - The repository still contains experimental/prototype code under `test/` and analysis utilities under `tools/`.
 - Weight streaming runtime is actively evolving; interfaces and JSON schema may continue to change.
+
+## Development Management
+
+### Requirement Specs
+
+- Memory profiling requirement: `docs/requirements/memory-01-decoder-memory-profiling.md`
+- Requirement filename format: `docs/requirements/meta-01-requirement-filename-format.md`
+- Development tracking summary: `docs/dev_log.md`
