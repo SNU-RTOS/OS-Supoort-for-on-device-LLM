@@ -250,11 +250,15 @@ run_with_single_prompt() {
     clear_caches
 
     # Build command as array (safe quoting)
-    #parallel_pread or io_uring
-    # local io_engine="parallel_pread" 
-    local io_engine="io_uring" 
-    local io_ring_depth=64
-    local io_subread_bytes=$((512*1024))
+    # Select io_engine (parallel_pread or io_uring) and following params
+    # local io_engine="io_uring" 
+    local io_ring_depth=16
+    local io_subread_bytes=$((128*1024))
+
+    local io_engine="parallel_pread" 
+    local io_min_block_size=$((512*1024))
+    local io_max_threads=4
+
     if [[ "$LOG_ENABLED" == "true" ]]; then
         local CMD=(
             "${BIN}"
@@ -274,6 +278,8 @@ run_with_single_prompt() {
             --io_engine "${io_engine}"
             --io_ring_depth "${io_ring_depth}"
             --io_subread_bytes "${io_subread_bytes}"
+            --io_min_block_size "${io_min_block_size}"
+            --io_max_threads "${io_max_threads}"
         )
     else
         local CMD=(
@@ -293,6 +299,8 @@ run_with_single_prompt() {
             --io_engine "${io_engine}"
             --io_ring_depth "${io_ring_depth}"
             --io_subread_bytes "${io_subread_bytes}"
+            --io_min_block_size "${io_min_block_size}"
+            --io_max_threads "${io_max_threads}"
         )
     fi
     

@@ -1,89 +1,58 @@
-# TFLite Model Structure Analyzer
+# model_dump/ Guide
 
-## Overview
+This directory provides utilities for dumping and analyzing LiteRT/TFLite model structure and weight-cache-related metadata.
 
-This tool is a Python script designed to parse TensorFlow Lite (`.tflite`) models and generate a detailed, human-readable log of their internal structure. It is particularly useful for understanding complex models that utilize nested subgraphs, such as those containing `STABLEHLO_COMPOSITE` operators.
+## Main files
 
-## Features
+- `dump_llm_nodes.cc`: core C++ model dump implementation
+- `build_model_parser.sh`: builds `dump_llm_nodes` (or requested binary name) via Bazel and copies it locally
+- `parse_model.sh`: batch runner over selected model directory (`*.tflite`)
+- `tensor_visualization.py`: post-processes dump log into analysis outputs
+- `weight_cache_check.bt`: optional tracing helper
 
-- **Hierarchical Structure Parsing:** Recursively parses the model's subgraphs and operators to reveal its complete structure.
-- **`STABLEHLO_COMPOSITE` Support:** Intelligently handles `STABLEHLO_COMPOSITE` operators by recursively analyzing their decomposed subgraphs.
-- **Detailed Node Analytics:** For each subgraph, it provides:
-  - Total number of operators.
-  - Total number of operators including all nested subgraphs.
-  - Count of `STABLEHLO_COMPOSITE` operators.
-- **Interactive CLI:** An easy-to-use command-line interface allows you to choose between:
-  1. Parsing the entire model.
-  2. Visualizing a single, specific subgraph.
+## Build
 
-## Setup
-
-The parser requires Python bindings for the TFLite schema, which can be generated from `schema.fbs` using the FlatBuffers compiler (`flatc`).
-
-A helper script, `parse_model.sh`, is provided to automate this process.
-
-1. **Ensure you have the FlatBuffers compiler (`flatc`)**. The script expects `flatc_x64` (for x86_64) or `flatc_arm64` (for aarch64) in the current directory.
-2. Run the `parse_model.sh` script. It will automatically check for the generated schema files and create them if they are missing.
-
-   ```bash
-   ./parse_model.sh
-   ```
-
-## Usage
-
-You can run the parser directly or use the provided shell script.
-
-### 1. Running with the script (Recommended)
-
-Modify `parse_model.sh` to point to the desired model file and execute it.
+From `tools/model_dump/`:
 
 ```bash
-# In parse_model.sh
-# ...
-python3 parser.py -m ../../models/Llama3.2-3B/llama3.2_q8_ekv1024.tflite
+./build_model_parser.sh
 ```
 
-Then run the script:
+This builds `tools/model_dump:dump_llm_nodes` and copies the result to `tools/model_dump/dump_llm_nodes`.
+
+## Batch run
+
+`parse_model.sh` is a convenience runner. It:
+
+1. builds the dump binary,
+2. iterates over models in `destination_dir`,
+3. executes dump,
+4. runs `tensor_visualization.py`.
+
+Run:
 
 ```bash
 ./parse_model.sh
 ```
 
-### 2. Running Manually
+Before running, adjust `destination_dir` inside `parse_model.sh` for your model location.
 
-Execute the Python script directly, optionally providing a path to your model.
+## Direct run example
 
 ```bash
-python3 parser.py -m /path/to/your/model.tflite
+./dump_llm_nodes \
+  --tflite_model /path/to/model.tflite \
+  --weight_cache_path /path/to/model.xnnpack_cache \
+  --dump_file_path /path/to/model_dump.log \
+  --num_threads 1 \
+  --dump_tensor_details \
+  --op_tensor_byte_stats
 ```
 
-If no model is specified, it uses a default path.
+## Outputs
 
-### Interactive Modes
+Typical outputs per model:
 
-After launching, the script will display the model being parsed and prompt you to choose a parsing mode:
-
-- **`1. Entire model`**: Parses every subgraph in the model and saves the output to a single `_entire.log` file.
-- **`2. Subgraph visualization`**: Lists all available signature definitions (e.g., `prefill`, `decode`) and their corresponding subgraph indices. You can then select a specific subgraph to parse. The output is saved to a log file named after the selected signature.
-
-## Output Format
-
-The script generates a `.log` file that details the model structure. Here is a sample output for a single subgraph:
-
-```log
-Subgraph 6: prefill (Total Nodes: 87, Including Nested: 537, STABLEHLO_COMPOSITE: 1)
-  [0000] RESHAPE
-  [0001] STABLEHLO_COMPOSITE  (→ Subgraph 538: odml.rms_norm.impl_355)
-   --------------------------------
-    Subgraph 538: odml.rms_norm.impl_355 (Total Nodes: 5, Including Nested: 5, STABLEHLO_COMPOSITE: 0)
-      [0000] CAST
-      [0001] MULTIPLY
-      ...
-   --------------------------------
-  [0002] CONCATENATION
-  ...
-```
-
-## Future Plans
-
-- [] Support Tensor info dump
+- `<model>_dump.log`
+- `<model>_analysis_report.txt`
+- `<model>_analysis_data.json`

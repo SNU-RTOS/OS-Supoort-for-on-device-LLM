@@ -375,30 +375,98 @@ void WeightChunkPrefetcher::RunParallelPreadWorkerLoop() {
 
 bool WeightChunkPrefetcher::ExecuteParallelPread(int fd, void* buffer, size_t size, off_t offset) {
   if (fd < 0 || buffer == nullptr || size == 0) {
+    std::cerr << "[parallel_pread] invalid arguments: fd=" << fd
+              << " buffer=" << buffer
+              << " size=" << size
+              << " offset=" << offset << std::endl;
     return false;
+  }
+
+  struct stat st;
+  if (fstat(fd, &st) != 0) {
+    const int err = errno;
+    std::cerr << "[parallel_pread] fstat failed: errno=" << err
+              << " (" << strerror(err) << ")" << std::endl;
+  } else {
+    if (offset + static_cast<off_t>(size) > st.st_size) {
+      std::cerr << "[parallel_pread] WARN: request out of range: offset=" << offset
+                << " size=" << size
+                << " file_size=" << st.st_size << std::endl;
+    }
   }
 
   if (size < pread_min_block_size_ * 2) {
     const ssize_t bytes_read = pread(fd, buffer, size, offset);
+    if (bytes_read < 0) {
+      const int err = errno;
+      std::cerr << "[parallel_pread] pread (single) failed: offset=" << offset
+                << " size=" << size
+                << " errno=" << err
+                << " (" << strerror(err) << ")" << std::endl;
+    } else if (static_cast<size_t>(bytes_read) != size) {
+      std::cerr << "[parallel_pread] pread (single) short read: offset=" << offset
+                << " size=" << size
+                << " bytes_read=" << bytes_read << std::endl;
+    }
     return bytes_read > 0 && static_cast<size_t>(bytes_read) == size;
   }
 
   const size_t num_threads = std::min(pread_max_threads_, size / pread_min_block_size_);
-  const size_t block_size = size / num_threads;
-  const size_t remainder = size % num_threads;
+
+  // For DIRECT_IO compatibility: enforce 4096-byte alignment for all sub-blocks.
+  constexpr size_t kDirectIOAlignment = 4096;
+
+  // Round per-thread size up to 4096 to ensure each block starts at 4096-aligned offset
+  size_t base_block_size = size / num_threads;
+  if (base_block_size % kDirectIOAlignment != 0) {
+    base_block_size = ((base_block_size + kDirectIOAlignment - 1) / kDirectIOAlignment) * kDirectIOAlignment;
+  }
+
+  // Total size covered by aligned blocks (may be >= requested size)
+  const size_t covered_size = base_block_size * num_threads;
+
+  // Tail adjustment: we restrict actual read size of last block so that
+  // 1) we don't read past the requested [offset, offset+size)
+  // 2) we keep file offsets 4096-aligned for DIRECT_IO
 
   std::vector<std::future<bool>> futures;
   futures.reserve(num_threads);
 
   for (size_t i = 0; i < num_threads; ++i) {
-    const size_t current_block_size = block_size + (i < remainder ? 1 : 0);
-    const size_t block_offset = i * block_size + std::min(i, remainder);
+    const size_t block_offset = i * base_block_size;
+
+    // If this block would start beyond requested range, skip it
+    if (block_offset >= size) {
+      continue;
+    }
+
+    size_t current_block_size = base_block_size;
+    // Clamp the last block to not exceed requested range
+    if (block_offset + current_block_size > size) {
+      current_block_size = size - block_offset;
+      // If tail is not aligned and fd is DIRECT_IO, kernel may still reject it,
+      // but offset alignment is preserved. This is acceptable for now because
+      // plan's aligned ranges should already be 4096-multiple sized.
+    }
 
     uint8_t* block_buffer = static_cast<uint8_t*>(buffer) + block_offset;
     const off_t block_file_offset = offset + block_offset;
 
     futures.emplace_back(std::async(std::launch::async, [=]() -> bool {
       const ssize_t bytes_read = pread(fd, block_buffer, current_block_size, block_file_offset);
+      if (bytes_read < 0) {
+        const int err = errno;
+        std::cerr << "[parallel_pread] pread (block) failed: block_index=" << i
+                  << " file_offset=" << block_file_offset
+                  << " size=" << current_block_size
+                  << " errno=" << err
+                  << " (" << strerror(err) << ")" << std::endl;
+      } else if (static_cast<size_t>(bytes_read) != current_block_size) {
+        std::cerr << "[parallel_pread] pread (block) short read: block_index=" << i
+                  << " file_offset=" << block_file_offset
+                  << " size=" << current_block_size
+                  << " bytes_read=" << bytes_read << std::endl;
+      }
       return bytes_read > 0 && static_cast<size_t>(bytes_read) == current_block_size;
     }));
   }
