@@ -1,6 +1,6 @@
-# Flash-SLiM: OS-Aware On-Device LLM Inference Framework
+# Flash-SLiM: Streaming LLM inference on Memory-constrained devices with Flash storage
 
-Flash-SLiM is a LiteRT(TensorFlow Lite)-based research framework for running decoder-only LLMs under memory constraints.  
+Flash-SLiM is a LiteRT(TensorFlow Lite)-based  framework for running LLMs under memory constraints
 The project focuses on **storage-aware weight streaming** with **I/O–Compute overlap**, and provides end-to-end tooling from metadata generation to runtime inference/profiling.
 
 ## Core Features (Tech at a glance)
