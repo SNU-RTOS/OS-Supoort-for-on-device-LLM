@@ -251,7 +251,7 @@ class PrefetchPlanner:
             GiB = 1 << 30
 
             return SmartPlanningStrategy(
-                max_buffer_size=700 * MiB, # buffer_size / 1 GB: 1 << 30 / 1 MB: 1 << 20
+                max_buffer_size=buffer_size, # buffer_size / 1 GB: 1 << 30 / 1 MB: 1 << 20
                 io_estimator=io_estimator,
                 default_compute_ms=self._resolve_default_compute_ms(),
             )

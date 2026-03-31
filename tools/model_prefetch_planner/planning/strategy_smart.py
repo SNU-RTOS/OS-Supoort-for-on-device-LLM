@@ -91,8 +91,107 @@ class SmartPlanningStrategy(PlanningStrategy):
     # ----------------------------
     # Core planning logic (mode)
     # ----------------------------
-
     def _plan_mode(
+        self,
+        mode: str,
+        chunks: Sequence[WeightChunkInfo],
+        context: PlanningContext,
+    ) -> Tuple[List[List[WeightChunkInfo]], List[float]]:
+        if not chunks:
+            return [], []
+
+        # 1) init: one chunk per segment
+        segs: List[List[WeightChunkInfo]] = [[c] for c in chunks]
+
+        # 2) sanity
+        if not self._peak_memory_ok(mode, segs):
+            raise ValueError(
+                f"[{mode}] initial 1-chunk segments violate max_buffer_size={self.max_buffer_size}."
+            )
+
+        # Define a stall objective that matches your “stall difference” intent.
+        # (If you already have _local_obj/_affected_boundaries, you can keep them,
+        # but boundary-local is usually clearer for this greedy.)
+        def boundary_stall(i: int) -> float:
+            left = segs[i]
+            right = segs[i + 1]
+            left_compute = self._segment_compute_ms(mode, left, context)
+            right_io = self._segment_io_ms(mode, right)
+            return max(0.0, right_io - left_compute)
+
+        for _ in range(self.max_passes):
+            any_change = False
+
+            i = 0
+            while i < len(segs) - 2:
+                # Keep moving HEAD from right -> left while it improves this boundary stall
+                while True:
+                    left = segs[i]
+                    right = segs[i + 1]
+                    if not right:
+                        # Shouldn’t happen often, but handle defensively
+                        del segs[i + 1]
+                        any_change = True
+                        break
+
+                    prev = boundary_stall(i)
+
+                    cand = right[0]  # <-- HEAD ONLY
+
+                    # Optional contiguity: if head is not contiguous, stop this boundary
+                    if not self._check_chunk_contiguity(left, right, cand):
+                        break
+
+                    # Tentative move
+                    left.append(cand)
+                    del right[0]
+
+                    # Memory feasibility for current segs
+                    if not self._peak_memory_ok(mode, segs):
+                        # rollback and STOP boundary (head-only policy)
+                        right.insert(0, cand)
+                        left.pop()
+                        break
+
+                    # If right became empty, deleting it changes the next boundary structure
+                    if len(right) == 0:
+                        tmp = segs[: i + 1] + segs[i + 2 :]
+                        if not self._peak_memory_ok(mode, tmp):
+                            # rollback and STOP boundary
+                            segs[i + 1].insert(0, cand)  # segs[i+1] is right (currently empty list)
+                            left.pop()
+                            break
+                        # commit deletion
+                        del segs[i + 1]
+                        any_change = True
+                        # After deletion, boundary (i, i+1) now refers to old (i, i+2),
+                        # so continue trying at same i.
+                        continue
+
+                    new = boundary_stall(i)
+
+                    if new < prev:
+                        any_change = True
+                        # Commit succeeded; continue at SAME boundary,
+                        # trying the NEW head right[0].
+                        continue
+                    else:
+                        # rollback and STOP boundary
+                        right.insert(0, cand)
+                        left.pop()
+                        break
+
+                i += 1
+
+            if not any_change:
+                break
+
+        group_io_times = [self._segment_io_ms(mode, g) for g in segs]
+        return segs, group_io_times
+
+
+
+    def _plan_mode_old(
         self,
         mode: str,
         chunks: Sequence[WeightChunkInfo],
@@ -201,8 +300,6 @@ class SmartPlanningStrategy(PlanningStrategy):
                         i += 1
                 else:
                     i += 1
-                    
-                # length = len(segs) # 원래 없었음
 
             if not any_change:
                 break

@@ -228,7 +228,7 @@ run_with_single_prompt() {
             --top_p "${TOP_P}"
             --repetition_penalty "${REPETITION_PENALTY}"
             --csv_profile_output_path "$CSV_LOG_FILE_PATH"
-            --model_dump_file_path "${MODEL_DIR}/${MODEL_NAME}_dump.log"
+            --model_dump_file_path "${MODEL_DIR}/${MODEL_NAME}_dump"
             --op_tensor_byte_stats
             --dump_tensor_details
             --profile_steps 10
@@ -247,7 +247,7 @@ run_with_single_prompt() {
             --top_k "${TOP_K}"
             --top_p "${TOP_P}"
             --repetition_penalty "${REPETITION_PENALTY}"
-            --model_dump_file_path "${MODEL_DIR}/${MODEL_NAME}_dump.log"
+            --model_dump_file_path "${MODEL_DIR}/${MODEL_NAME}_dump"
             --op_tensor_byte_stats
             --dump_tensor_details
             --profile_steps 10
@@ -314,11 +314,11 @@ run_with_single_prompt() {
     #     --profile-pattern ${BPF_LOG_FILE_PATH} \
     #     --strategy sizeonly
 
-    python3 ./tools/model_prefetch_planner/prefetch_planner.py \
-        --cmt weight_chunks_metadata_table.json \
-        --output prefetch_plan_smart_${NUM_THREADS}_${TOKENS}.json \
-        --profile-pattern ${BPF_LOG_FILE_PATH} \
-        --strategy smart
+    # python3 ./tools/model_prefetch_planner/prefetch_planner.py \
+    #     --cmt weight_chunks_metadata_table.json \
+    #     --output prefetch_plan_smart_${NUM_THREADS}_${TOKENS}.json \
+    #     --profile-pattern ${BPF_LOG_FILE_PATH} \
+    #     --strategy smart
 }
 
 # =========================================================================== #

@@ -35,14 +35,14 @@ banner "Script Configuration"
 
 # --- Model and Binary Settings ---
 # You can switch models by uncommenting the desired lines.
-MODEL_DIR="${MODEL_PATH}/Llama2-7B"
-MODEL_NAME="llama2_7b_q8_ekv1280"
+# MODEL_DIR="${MODEL_PATH}/Llama2-7B"
+# MODEL_NAME="llama2_7b_q8_ekv1280"
 
 # MODEL_DIR="${MODEL_PATH}/Llama3.2-1B"
 # MODEL_NAME="llama3.2_q8_ekv1280"
 
-# MODEL_DIR="${MODEL_PATH}/Llama3.2-3B"
-# MODEL_NAME="llama3.2_q8_ekv1024"
+MODEL_DIR="${MODEL_PATH}/Llama3.2-3B"
+MODEL_NAME="llama3.2_q8_ekv1024"
 
 # MODEL_DIR="${MODEL_PATH}/Gemma3-1B"
 # MODEL_NAME="gemma3_q4_ekv2048"
@@ -76,7 +76,7 @@ MAX_TOK_LEN=16         # Default max tokens to generate
 NUM_REPEATS=1          # Default number of iterations
 MEMORY_LIMITS=()       # Array of memory limits for cgroup testing
 ENABLE_CGROUP=false    # Default cgroup enable state
-BPF_PHASE_LOGGING=true # Default BPF phase logging
+BPF_PHASE_LOGGING=false # Default BPF phase logging
 
 # --- Logging Settings ---
 # Base directory for logs. The final path will be e.g. <LOG_DIR_BASE>/<model_target_mem>
@@ -260,8 +260,8 @@ run_with_single_prompt() {
     # Build command as array (safe quoting)
     # Select io_engine (parallel_pread or io_uring) and following params
     local io_engine="io_uring" 
-    local io_ring_depth=16
-    local io_subread_bytes=$((512*1024))
+    local io_ring_depth=1
+    local io_subread_bytes=$((1*1024*1024))
 
     # local io_engine="parallel_pread" 
     local io_min_block_size=$((128*1024))
