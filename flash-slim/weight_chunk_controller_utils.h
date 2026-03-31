@@ -10,6 +10,8 @@
 #include "nlohmann/json.hpp"
 #include "tflite/delegates/xnnpack/streaming_weight_cache.h"
 
+#include "mutable_tensor_tracker.h"
+#include "prefetch_planner.h"
 #include "weight_chunk_prefetcher.h"
 
 namespace flash_slim::streaming
@@ -60,6 +62,36 @@ namespace flash_slim::streaming
 
         size_t GetMaxAlignedSize() const { return max_aligned_size_; }
 
+        // Read-back accessors (used by cmt_generator to feed the planner).
+        const std::vector<WeightChunkInfo> &GetRecordedChunks(const std::string &mode) const
+        {
+            static const std::vector<WeightChunkInfo> kEmpty;
+            auto it = recorded_chunks_.find(mode);
+            return (it != recorded_chunks_.end()) ? it->second : kEmpty;
+        }
+
+        SubgraphMutableMemoryProfile GetMutableMemoryProfile(const std::string &mode) const
+        {
+            auto it = mutable_profiles_.find(mode);
+            return (it != mutable_profiles_.end()) ? it->second : SubgraphMutableMemoryProfile{};
+        }
+
+        // Store the mutable-tensor memory profile collected for a given mode
+        // (e.g. "PREFILL", "DECODE"). Serialized into "mutable_memory_profile".
+        void SetMutableMemoryProfile(
+            const std::string &mode,
+            const SubgraphMutableMemoryProfile &profile);
+
+        // Store a planned prefetch schedule produced by PrefetchPlanner.
+        // Serializes into "prefetch_plan" in the output JSON.
+        // planned_peak_memory_bytes : peak actually achieved by the plan
+        // memory_budget_bytes       : budget that was requested / used
+        void SetPrefetchPlan(
+            const std::string &mode,
+            const std::vector<PlannedChunkGroup> &groups,
+            size_t planned_peak_memory_bytes,
+            size_t memory_budget_bytes);
+
     private:
         std::string output_path_;
         nlohmann::ordered_json json_root_; // Root JSON object
@@ -70,6 +102,17 @@ namespace flash_slim::streaming
         std::map<std::string, size_t> per_mode_total_aligned_size_;
         std::map<std::string, size_t> last_chunk_aligned_size_;
         std::string model_path_;
+
+        // Mirror of recorded chunks (needed to compute group offsets in Finalize).
+        std::map<std::string, std::vector<WeightChunkInfo>> recorded_chunks_;
+
+        // Planned prefetch schedule: mode -> groups.
+        std::map<std::string, std::vector<PlannedChunkGroup>> planned_groups_;
+        size_t planned_peak_memory_bytes_ = 0;
+        size_t memory_budget_bytes_ = 0;
+
+        // Mutable tensor profiles: mode -> profile.
+        std::map<std::string, SubgraphMutableMemoryProfile> mutable_profiles_;
     };
 
     //* ==================== JsonPrefetchPlanLoader ==================== */
@@ -130,6 +173,14 @@ namespace flash_slim::streaming
         // 원본 JSON에 접근이 필요하면 제공
         const nlohmann::ordered_json &raw_json() const { return root_; }
 
+        // Accessors for new fields written by the planner.
+        size_t planned_peak_memory_bytes() const { return planned_peak_memory_bytes_; }
+        size_t memory_budget_bytes() const { return memory_budget_bytes_loader_; }
+
+        // Returns the mutable memory profile for the given mode, or a zeroed
+        // default if the JSON does not contain the section.
+        SubgraphMutableMemoryProfile mutable_memory_profile(const std::string &mode) const;
+
     private:
         void Clear();
         bool LoadRootFromFile(const std::string &path);
@@ -147,6 +198,14 @@ namespace flash_slim::streaming
         std::map<std::string, uint64_t> size_by_mode_;
         std::map<std::string, std::vector<WeightChunkInfo>> weight_chunks_;
         std::map<std::string, std::vector<WeightChunkGroupInfo>> io_order_groups_;
+
+        // Fields populated from the new planner-written JSON sections.
+        size_t planned_peak_memory_bytes_ = 0;
+        size_t memory_budget_bytes_loader_ = 0;
+        std::map<std::string, SubgraphMutableMemoryProfile> mutable_profiles_;
+
+        bool ParseMutableMemoryProfile(const nlohmann::ordered_json &profile_root);
+
         static std::vector<std::string> KeysOf(const nlohmann::ordered_json &obj);
     };
 

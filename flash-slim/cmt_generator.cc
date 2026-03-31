@@ -1,6 +1,10 @@
 #include "cmt_generator.h"
+#include "mutable_tensor_tracker.h"
+#include "prefetch_planner.h"
 
-
+using flash_slim::streaming::CollectSubgraphMutableMemory;
+using flash_slim::streaming::PrefetchPlanner;
+using flash_slim::streaming::PlannerConfig;
 
 // ----------------------
 // absl::FLAGS definition
@@ -25,6 +29,9 @@ ABSL_FLAG(bool, op_tensor_byte_stats, false, "Whether to append per-operator agg
 ABSL_FLAG(std::string, model_dump_file_path, "", "Path to save the log file. If empty, no log file is generated.");
 ABSL_FLAG(std::string, output_cmt_path, "weight_chunks_metadata_table.json", "Path to the weight chunk prefetch plan JSON file.");
 ABSL_FLAG(int, profile_steps, 25, "Number of decoding steps to profile. If 0, profiling is disabled. default is 25.");
+ABSL_FLAG(int64_t, memory_budget_bytes, 0,
+    "DRAM budget (bytes) for memory-aware prefetch planning. "
+    "0 (default) = automatically use the computed minimum feasible peak memory.");
 
 namespace
 {
@@ -763,6 +770,34 @@ int main(int argc, char *argv[])
         std::cout << "[INFO] Prefill Signature: " << prefill_runner->signature_key() << std::endl;
         std::cout << "[INFO] Decode Signature: " << decode_runner->signature_key() << std::endl;
 
+        //* ============ [Phase] 7.5. Collect Mutable Tensor Memory Profiles ============ */
+        // Walk each signature's subgraph to measure KV-cache and activation bytes.
+        // Must be called after AllocateTensors() so allocation types are finalized.
+        {
+            auto collect_and_store = [&](tflite::SignatureRunner *runner,
+                                         const std::string &mode_name)
+            {
+                if (!runner) return;
+                const int sg_idx = interpreter->GetSubgraphIndexFromSignature(
+                    runner->signature_key());
+                if (sg_idx < 0)
+                {
+                    std::cerr << "[INFO] Cannot find subgraph for signature: "
+                              << runner->signature_key() << std::endl;
+                    return;
+                }
+                auto profile = CollectSubgraphMutableMemory(interpreter.get(), sg_idx);
+                std::cout << "[INFO] Mutable memory profile [" << mode_name << "]:"
+                          << " weight=" << profile.total_weight_bytes
+                          << " activation=" << profile.total_activation_bytes
+                          << " kv_cache=" << profile.total_kv_cache_bytes
+                          << " bytes\n";
+                cmt_writer.SetMutableMemoryProfile(mode_name, profile);
+            };
+            collect_and_store(prefill_runner, "PREFILL");
+            collect_and_store(decode_runner, "DECODE");
+        }
+
         //* ============ [Phase] 8. Prepare Input Tensors ============ */
         TfLiteTensor *prefill_input = nullptr;
         TfLiteTensor *prefill_input_pos = nullptr;
@@ -809,34 +844,43 @@ int main(int argc, char *argv[])
 
         //* ============================================== Model Dump  ========================================================= */
 
-        // //* ============ [Optional 1] Inspect Model ============ */
+        //* ============ [Optional 1] Inspect Model ============ */
 
-        // std::string prefill_selected_signature_key = prefill_runner->signature_key();
-        // std::string decode_selected_signature_key = decode_runner->signature_key();
+        std::string prefill_selected_signature_key = prefill_runner->signature_key();
+        std::string decode_selected_signature_key = decode_runner->signature_key();
 
-        // std::ofstream dump_file(absl::GetFlag(FLAGS_model_dump_file_path));
-        // if (!dump_file.is_open())
-        // {
-        //     std::cerr << "❌ Failed to open log file: " << absl::GetFlag(FLAGS_model_dump_file_path) << std::endl;
-        //     return 1;
-        // }
-        // dump_file << "\n=== After Applying Delegate ===" << std::endl;
-        // InspectSignatureExecutionPlan(interpreter.get(), prefill_selected_signature_key, tensor_buffer_map, &dump_file);
-        // dump_file.close();
+        std::ofstream dump_file_prefill(absl::GetFlag(FLAGS_model_dump_file_path)+"_prefill.log");
+        std::ofstream dump_file_decode(absl::GetFlag(FLAGS_model_dump_file_path)+"_decode.log");
+        if (!dump_file_prefill.is_open())
+        {
+            std::cerr << "❌ Failed to open log file: " << absl::GetFlag(FLAGS_model_dump_file_path) << "_prefill.log" << std::endl;
+            return 1;
+        }
+        if (!dump_file_decode.is_open())
+        {
+            std::cerr << "❌ Failed to open log file: " << absl::GetFlag(FLAGS_model_dump_file_path) << "_decode.log" << std::endl;
+            return 1;
+        }
+        dump_file_prefill << "\n=== After Applying Delegate ===" << std::endl;
+        InspectSignatureExecutionPlan(interpreter.get(), prefill_selected_signature_key, tensor_buffer_map, &dump_file_prefill);
+        dump_file_prefill.close();
+        dump_file_decode << "\n=== After Applying Delegate ===" << std::endl;
+        InspectSignatureExecutionPlan(interpreter.get(), decode_selected_signature_key, tensor_buffer_map, &dump_file_decode);
+        dump_file_decode.close();
 
-        // //* ============ [Optional 2] Dump Weight Cache ============ */
-        // weight_cache_provider->DumpWeightCacheStructureToFile("weight_cache_structure.log");
-        // weight_cache_provider->DumpTensorIdentifierMapToFile("weight_cache_tensor_id_map.log");
-        // ValidateWeightCacheMappings(interpreter.get(),
-        //                             prefill_selected_signature_key,
-        //                             tensor_buffer_map,
-        //                             weight_cache_provider.get(),
-        //                             "weight_cache_validation.log");
+        //* ============ [Optional 2] Dump Weight Cache ============ */
+        weight_cache_provider->DumpWeightCacheStructureToFile("weight_cache_structure.log");
+        weight_cache_provider->DumpTensorIdentifierMapToFile("weight_cache_tensor_id_map.log");
+        ValidateWeightCacheMappings(interpreter.get(),
+                                    prefill_selected_signature_key,
+                                    tensor_buffer_map,
+                                    weight_cache_provider.get(),
+                                    "weight_cache_validation.log");
 
-        // //* ============ [Optional 3] Buffer Test ============ */
-        // std::cout << "Verifying Buffer in weight cache" << std::endl;
-        // weight_cache_provider->VerifyAllBuffers();
-        // std::cout << "Verification done" << std::endl;
+        //* ============ [Optional 3] Buffer Test ============ */
+        std::cout << "Verifying Buffer in weight cache" << std::endl;
+        weight_cache_provider->VerifyAllBuffers();
+        std::cout << "Verification done" << std::endl;
 
         //* ============================================== Generate Prefetch Plan ========================================================= */
 
@@ -949,6 +993,51 @@ int main(int argc, char *argv[])
 
         // Print current page cache usage
         flash_slim::util::print_current_page_cache_kb();
+
+        //* ============ [Phase] 12. Memory-Aware Prefetch Planning ============ */
+        {
+            PrefetchPlanner planner;
+            const size_t budget =
+                static_cast<size_t>(absl::GetFlag(FLAGS_memory_budget_bytes));
+
+            // Collect KV-cache size from the mutable profile of the decode subgraph.
+            // The KV-cache tensors are classified as kTfLiteCustom, so they appear in
+            // total_kv_cache_bytes.  If that is 0 (e.g. profile not collected or no
+            // custom tensors), we use the PREFILL profile's kv_cache bytes as a fallback.
+            // In the worst case we fall back to 0 (no KV-cache contribution), which
+            // under-estimates peak memory but is still safe for grouping.
+            const auto decode_profile = cmt_writer.GetMutableMemoryProfile("DECODE");
+            const size_t kv_cache_bytes =
+                (decode_profile.total_kv_cache_bytes > 0)
+                    ? decode_profile.total_kv_cache_bytes
+                    : cmt_writer.GetMutableMemoryProfile("PREFILL").total_kv_cache_bytes;
+
+            for (const std::string &mode_name :
+                     std::initializer_list<std::string>{"PREFILL", "DECODE"})
+            {
+                const auto &chunks = cmt_writer.GetRecordedChunks(mode_name);
+                if (chunks.empty())
+                {
+                    std::cout << "[INFO] No chunks recorded for mode " << mode_name
+                              << ", skipping planner.\n";
+                    continue;
+                }
+
+                auto [groups, used_budget] = planner.BuildPlan(
+                    chunks, kv_cache_bytes, PlannerConfig{budget});
+
+                // Compute the maximum peak across all groups for the metadata field.
+                size_t max_peak = 0;
+                for (const auto &g : groups)
+                    max_peak = std::max(max_peak, g.peak_memory_bytes);
+
+                std::cout << "[INFO] Prefetch plan [" << mode_name << "]: "
+                          << groups.size() << " groups, peak=" << max_peak
+                          << " bytes, budget=" << used_budget << " bytes\n";
+
+                cmt_writer.SetPrefetchPlan(mode_name, groups, max_peak, used_budget);
+            }
+        }
 
         // Release resources in reverse order of allocation
         cmt_writer.Finalize();

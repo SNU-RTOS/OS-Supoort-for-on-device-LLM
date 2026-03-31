@@ -121,10 +121,30 @@ cc_library(
 )
 
 cc_library(
+    name = "mutable_tensor_tracker",
+    srcs = ["mutable_tensor_tracker.cc"],
+    hdrs = ["mutable_tensor_tracker.h"],
+    deps = [
+        "@litert//tflite:framework",
+    ],
+)
+
+cc_library(
+    name = "prefetch_planner",
+    srcs = ["prefetch_planner.cc"],
+    hdrs = ["prefetch_planner.h"],
+    deps = [
+        ":weight_chunk_prefetcher",
+    ],
+)
+
+cc_library(
     name = "weight_chunk_controller_utils",
     srcs = ["weight_chunk_controller_utils.cc"],
     hdrs = ["weight_chunk_controller_utils.h"],
     deps = [
+        ":mutable_tensor_tracker",
+        ":prefetch_planner",
         ":weight_chunk_prefetcher",
         "//flash-slim/nlohmann:nlohmann_json",
         "@litert//tflite/delegates/xnnpack:streaming_weight_cache",
@@ -214,6 +234,8 @@ cc_binary(
     linkopts = tflite_linkopts(),
     deps = [
         ":common",
+        ":mutable_tensor_tracker",
+        ":prefetch_planner",
     ],
 )
 

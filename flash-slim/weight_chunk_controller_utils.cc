@@ -10,6 +10,7 @@
 #include "weight_chunk_controller_utils.h"
 #include <algorithm>
 #include <iostream>
+#include <unordered_map>
 
 namespace flash_slim
 {
@@ -86,6 +87,9 @@ namespace flash_slim
             // Counters
             per_mode_counts_[mode_key] += 1;
             per_mode_total_aligned_size_[mode_key] += static_cast<size_t>(chunk_info.aligned_size);
+
+            // Mirror into recorded_chunks_ for use in Finalize().
+            recorded_chunks_[mode_key].push_back(chunk_info);
         }
 
         void JsonWeightChunkMetaDataWriter::Finalize()
@@ -128,6 +132,28 @@ namespace flash_slim
             }
             meta["total_aligned_size_by_mode"] = mode_total_sizes;
 
+            // --- Mutable memory profile ---
+            if (!mutable_profiles_.empty())
+            {
+                nlohmann::ordered_json mmp = nlohmann::ordered_json::object();
+                for (const auto &kv : mutable_profiles_)
+                {
+                    nlohmann::ordered_json entry;
+                    entry["total_weight_bytes"]     = kv.second.total_weight_bytes;
+                    entry["total_activation_bytes"] = kv.second.total_activation_bytes;
+                    entry["total_kv_cache_bytes"]   = kv.second.total_kv_cache_bytes;
+                    mmp[kv.first] = std::move(entry);
+                }
+                meta["mutable_memory_profile"] = std::move(mmp);
+            }
+
+            // --- Planner output ---
+            if (planned_peak_memory_bytes_ > 0)
+            {
+                meta["planned_peak_memory_bytes"] = planned_peak_memory_bytes_;
+                meta["memory_budget_bytes"]       = memory_budget_bytes_;
+            }
+
             // Build final root with metadata first, then weight_chunks (ordered_json preserves insertion order)
             nlohmann::ordered_json final_root = nlohmann::ordered_json::object();
             final_root["metadata"] = meta;
@@ -140,6 +166,76 @@ namespace flash_slim
                 final_root["weight_chunks"] = nlohmann::ordered_json::object();
             }
 
+            // --- prefetch_plan section ---
+            // Serialize PlannedChunkGroups, computing byte-level offsets from
+            // the recorded chunk metadata.
+            if (!planned_groups_.empty())
+            {
+                nlohmann::ordered_json prefetch_plan = nlohmann::ordered_json::object();
+
+                for (const auto &mode_kv : planned_groups_)
+                {
+                    const std::string &mode          = mode_kv.first;
+                    const auto &groups               = mode_kv.second;
+                    const auto &chunks_for_mode_it   = recorded_chunks_.find(mode);
+
+                    // Build chunk_index -> WeightChunkInfo lookup.
+                    std::unordered_map<size_t, const WeightChunkInfo *> idx_to_chunk;
+                    if (chunks_for_mode_it != recorded_chunks_.end())
+                    {
+                        for (const auto &c : chunks_for_mode_it->second)
+                        {
+                            idx_to_chunk[c.chunk_index] = &c;
+                        }
+                    }
+
+                    nlohmann::ordered_json mode_plan = nlohmann::ordered_json::object();
+                    for (const auto &group : groups)
+                    {
+                        nlohmann::ordered_json g;
+
+                        // Compute start offsets and total_aligned_size from chunk data.
+                        size_t start_origin_offset  = 0;
+                        size_t start_aligned_offset = 0;
+                        size_t max_extent           = 0;
+                        bool first_chunk_seen       = false;
+
+                        std::vector<size_t> relative_offsets;
+                        relative_offsets.reserve(group.chunk_indices.size());
+
+                        for (size_t ci : group.chunk_indices)
+                        {
+                            auto it = idx_to_chunk.find(ci);
+                            if (it == idx_to_chunk.end()) continue;
+                            const WeightChunkInfo &c = *it->second;
+
+                            if (!first_chunk_seen)
+                            {
+                                start_origin_offset  = c.origin_offset;
+                                start_aligned_offset = c.aligned_offset;
+                                first_chunk_seen     = true;
+                            }
+                            const size_t rel = (c.aligned_offset >= start_aligned_offset)
+                                                   ? c.aligned_offset - start_aligned_offset
+                                                   : 0;
+                            relative_offsets.push_back(rel);
+                            max_extent = std::max(max_extent, rel + c.aligned_size);
+                        }
+
+                        g["start_origin_offset"]    = start_origin_offset;
+                        g["start_aligned_offset"]   = start_aligned_offset;
+                        g["total_aligned_size"]     = max_extent;
+                        g["peak_memory_bytes"]      = group.peak_memory_bytes;
+                        g["chunk_indices"]          = group.chunk_indices;
+                        g["chunk_relative_offsets"] = relative_offsets;
+
+                        mode_plan[std::to_string(group.group_index)] = std::move(g);
+                    }
+                    prefetch_plan[mode] = std::move(mode_plan);
+                }
+                final_root["prefetch_plan"] = std::move(prefetch_plan);
+            }
+
             // Write root object with pretty formatting (indent=2)
             output_file << final_root.dump(2) << std::endl;
             output_file.close();
@@ -148,6 +244,25 @@ namespace flash_slim
                       << "[JsonWeightChunkMetaDataWriter] Wrote chunk metadata to: " << output_path_ << std::endl;
 
             finalized_ = true;
+        }
+
+        void JsonWeightChunkMetaDataWriter::SetMutableMemoryProfile(
+            const std::string &mode,
+            const SubgraphMutableMemoryProfile &profile)
+        {
+            mutable_profiles_[mode] = profile;
+        }
+
+        void JsonWeightChunkMetaDataWriter::SetPrefetchPlan(
+            const std::string &mode,
+            const std::vector<PlannedChunkGroup> &groups,
+            size_t planned_peak_memory_bytes,
+            size_t memory_budget_bytes)
+        {
+            planned_groups_[mode]        = groups;
+            planned_peak_memory_bytes_   = std::max(planned_peak_memory_bytes_,
+                                                    planned_peak_memory_bytes);
+            memory_budget_bytes_         = memory_budget_bytes;
         }
 
         //* ==================== JsonPrefetchPlanLoader ==================== */
@@ -227,6 +342,21 @@ namespace flash_slim
                 {
                     return false;
                 }
+            }
+
+            // Optional new sections — tolerate absence for backward compatibility.
+            const auto &meta = root_.at("metadata");
+            if (meta.contains("planned_peak_memory_bytes"))
+            {
+                planned_peak_memory_bytes_ = meta.at("planned_peak_memory_bytes").get<uint64_t>();
+            }
+            if (meta.contains("memory_budget_bytes"))
+            {
+                memory_budget_bytes_loader_ = meta.at("memory_budget_bytes").get<uint64_t>();
+            }
+            if (meta.contains("mutable_memory_profile"))
+            {
+                ParseMutableMemoryProfile(meta.at("mutable_memory_profile"));
             }
 
             DeriveWeightChunkBufferSize();
@@ -688,5 +818,34 @@ namespace flash_slim
 
             return plan;
         }
+        bool JsonPrefetchPlanLoader::ParseMutableMemoryProfile(
+            const nlohmann::ordered_json &profile_root)
+        {
+            if (!profile_root.is_object()) return true; // tolerate missing section
+
+            for (auto it = profile_root.begin(); it != profile_root.end(); ++it)
+            {
+                const std::string &mode = it.key();
+                const auto &entry       = it.value();
+                SubgraphMutableMemoryProfile p;
+                if (entry.contains("total_weight_bytes"))
+                    p.total_weight_bytes = entry.at("total_weight_bytes").get<uint64_t>();
+                if (entry.contains("total_activation_bytes"))
+                    p.total_activation_bytes = entry.at("total_activation_bytes").get<uint64_t>();
+                if (entry.contains("total_kv_cache_bytes"))
+                    p.total_kv_cache_bytes = entry.at("total_kv_cache_bytes").get<uint64_t>();
+                mutable_profiles_[mode] = std::move(p);
+            }
+            return true;
+        }
+
+        SubgraphMutableMemoryProfile JsonPrefetchPlanLoader::mutable_memory_profile(
+            const std::string &mode) const
+        {
+            auto it = mutable_profiles_.find(mode);
+            if (it == mutable_profiles_.end()) return {};
+            return it->second;
+        }
+
     } // namespace streaming
 } // namespace flash_slim
